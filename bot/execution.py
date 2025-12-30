@@ -17,6 +17,7 @@ from py_clob_client.clob_types import (
     AssetType,
     OrderArgs,
     OrderType,
+    TradeParams,
 )
 from py_clob_client.constants import POLYGON
 from py_clob_client.order_builder.constants import BUY, SELL
@@ -184,6 +185,107 @@ class ExecutionEngine:
         except Exception as e:
             logger.exception(f"Failed to get order book for {token_id}: {e}")
             return None
+
+    def get_last_trades(self, limit: int = 10) -> list[dict]:
+        """
+        Get the last N trades for the current user with PnL calculation.
+
+        Args:
+            limit: Maximum number of trades to return (default 10)
+
+        Returns:
+            List of trade dictionaries with PnL information
+        """
+        if not self.is_initialized():
+            return []
+
+        try:
+            # Fetch all trades for this user
+            all_trades = self.client.get_trades(TradeParams())
+
+            # Sort by timestamp descending (most recent first)
+            sorted_trades = sorted(
+                all_trades,
+                key=lambda t: t.get("match_time", t.get("created_at", "")),
+                reverse=True
+            )
+
+            # Take the last N trades
+            recent_trades = sorted_trades[:limit]
+
+            # Process trades and calculate PnL
+            processed_trades = []
+            for trade in recent_trades:
+                processed = self._process_trade_with_pnl(trade)
+                processed_trades.append(processed)
+
+            return processed_trades
+
+        except Exception as e:
+            logger.exception(f"Failed to get trades: {e}")
+            return []
+
+    def _process_trade_with_pnl(self, trade: dict) -> dict:
+        """
+        Process a trade and calculate its PnL.
+
+        For Polymarket binary outcomes:
+        - BUY side: You pay (price * size). If outcome = YES, you get (1 * size).
+          Realized PnL on buy = (outcome_price - entry_price) * size
+        - SELL side: You receive (price * size). If you sold shares you owned.
+          Realized PnL on sell = (sell_price - avg_cost) * size
+
+        For unrealized PnL, we compare current market price to entry price.
+        """
+        try:
+            side = trade.get("side", "").upper()
+            price = float(trade.get("price", 0))
+            size = float(trade.get("size", 0))
+            token_id = trade.get("asset_id", trade.get("token_id", ""))
+
+            # Calculate trade value (amount spent/received)
+            trade_value = price * size
+
+            # Get current price for unrealized PnL calculation
+            current_price = None
+            unrealized_pnl = None
+            try:
+                if token_id:
+                    last_price_data = self.client.get_last_trade_price(token_id)
+                    if last_price_data and "price" in last_price_data:
+                        current_price = float(last_price_data["price"])
+
+                        # Calculate unrealized PnL
+                        if side == "BUY":
+                            # If you bought, unrealized = (current - entry) * size
+                            unrealized_pnl = (current_price - price) * size
+                        else:
+                            # If you sold, the position is closed (no unrealized)
+                            unrealized_pnl = 0.0
+            except Exception:
+                pass  # Silently handle price fetch failures
+
+            # Build the processed trade object
+            processed = {
+                "id": trade.get("id", ""),
+                "match_time": trade.get("match_time", trade.get("created_at", "")),
+                "side": side,
+                "price": price,
+                "size": size,
+                "token_id": token_id,
+                "market": trade.get("market", ""),
+                "trade_value": round(trade_value, 4),
+                "fee": float(trade.get("fee", 0)),
+                "current_price": current_price,
+                "unrealized_pnl": round(unrealized_pnl, 4) if unrealized_pnl is not None else None,
+                "status": trade.get("status", trade.get("outcome", "filled")),
+            }
+
+            return processed
+
+        except Exception as e:
+            logger.warning(f"Failed to process trade: {e}")
+            return trade
 
     def place_order(
         self,

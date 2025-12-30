@@ -1017,6 +1017,49 @@ async def get_markets():
     return get_market_summary()
 
 
+@app.get("/lastten", dependencies=[Depends(verify_token)])
+async def get_last_ten_trades():
+    """
+    Get the last 10 trades with PnL metrics.
+
+    Returns:
+        - trades: List of the last 10 trades with PnL data
+        - summary: Aggregate PnL statistics
+    """
+    trades = engine.get_last_trades(limit=10)
+
+    # Calculate summary statistics
+    total_unrealized_pnl = 0.0
+    total_trade_value = 0.0
+    total_fees = 0.0
+    buy_count = 0
+    sell_count = 0
+
+    for trade in trades:
+        total_trade_value += trade.get("trade_value", 0)
+        total_fees += trade.get("fee", 0)
+
+        if trade.get("unrealized_pnl") is not None:
+            total_unrealized_pnl += trade.get("unrealized_pnl", 0)
+
+        if trade.get("side") == "BUY":
+            buy_count += 1
+        elif trade.get("side") == "SELL":
+            sell_count += 1
+
+    return {
+        "trades": trades,
+        "summary": {
+            "trade_count": len(trades),
+            "buy_count": buy_count,
+            "sell_count": sell_count,
+            "total_trade_value": round(total_trade_value, 4),
+            "total_fees": round(total_fees, 4),
+            "total_unrealized_pnl": round(total_unrealized_pnl, 4),
+        }
+    }
+
+
 @app.post("/cancel-all", dependencies=[Depends(verify_token)])
 async def cancel_all_orders():
     """Cancel all open orders."""
